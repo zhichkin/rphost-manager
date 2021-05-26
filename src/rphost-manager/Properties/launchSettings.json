@@ -1,0 +1,10 @@
+﻿{
+  "profiles": {
+    "rphost_manager": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
