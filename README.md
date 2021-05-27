@@ -30,3 +30,20 @@ sc create "1C RpHost Manager" binPath="D:\RphostManager\rphost-manager.exe"
 - **WorkingServers** - список рабочих серверов 1С, которые нужно инспектировать. Если не указано, то все. Строковые значения, перечисленные через запятую.
 - **WorkingServerResetWaitTime** - период ожидания переключения rphost'ов менеджером кластера 1С в нерабочее состояние в секундах.
 - **WorkingProcessMemoryLimit** - лимит памяти для одного rphost'а в килобайтах.
+
+**Пример файла настроек appsettings.json**
+```JSON
+{
+  "LogSize": 262144,
+  "InspectionPeriodicity": 180,
+  "ServerAddress": "tcp://MSK01:1540",
+  "UserName": "",
+  "Password": "",
+  "WorkingServers": [ "MSK01-SRV01.LOCAL" ],
+  "WorkingServerResetWaitTime": 10,
+  "WorkingProcessMemoryLimit": 4194304,
+  "HostOptions": {
+    "ShutdownTimeout": "00:00:30"
+  }
+}
+```
