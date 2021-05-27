@@ -5,4 +5,27 @@
 
 Совместимо с версиями платформы 1С:Предприятие 8.3.15 и выше.
 
+**Установка**
+1. Установить [.NET Core 3.1](https://dotnet.microsoft.com/download).
+2. Установить COMConnector 1C, выполнив команду от имени администратора:
+```SQL
+regsvr32 "C:\Program Files\1cv8\8.3.15.1778\bin\comcntr.dll"
+```
+4. Распаковать содержимое установочного архива в любой каталог.
+5. Установить сервис WIndows, выполнив команду от имени администратора:
+```SQL
+sc create "1C RpHost Manager" binPath="D:\RphostManager\rphost-manager.exe"
+```
+
+**Настройка**
+
+- **LogSize** - размер лога программы в байтах. По достижению этого лимита файл лога перезаписывается.
+- **InspectionPeriodicity** - периодичность инспекции объёма памяти, используемого rphost'ами, в секундах.
+- **ServerAddress** - адрес центрального сервера 1С.
+- **UserName** - имя пользователя для подключения к кластеру 1С.
+- **Password** - пароль пользователя для подключения к кластеру 1С.
+- **WorkingServers** - список рабочих серверов 1С, которые нужно инспектировать. Если не указано, то все. Строковые значения, перечисленные через запятую.
+- **WorkingServerResetWaitTime** - период ожидания переключения rphost'ов менеджером кластера 1С в нерабочее состояние в секундах.
+- **WorkingProcessMemoryLimit** - лимит памяти для одного rphost'а в килобайтах.
+
 [Подробности в статье от экспертов 1С:Рарус.](https://rarus.ru/publications/20200518-ot-ekspertov-1c-rarus-optimizatsiya-perezapuska-rabochikh-protsessov-na-platforme-1c-8-3-15-i-vyshe-424479/#povyshennyi-raskhod-pamyati-i-vozmozhnye-prichiny)
