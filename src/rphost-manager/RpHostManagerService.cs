@@ -1,7 +1,6 @@
 ﻿using Microsoft.Extensions.Options;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -14,6 +13,12 @@ namespace rphost_manager
     }
     public sealed class RpHostManagerService : IRpHostManagerService
     {
+        private const string CONST_CLSID = "181E893D-73A4-4722-B61D-D604B3D67D47";
+        private const string CONST_PROGID = "V83.COMConnector";
+
+        private object _connector;
+        private object _serverAgent;
+
         private AppSettings Settings { get; set; }
         private IServiceProvider Services { get; set; }
         public RpHostManagerService(IServiceProvider serviceProvider, IOptions<AppSettings> options)
@@ -21,231 +26,368 @@ namespace rphost_manager
             Settings = options.Value;
             Services = serviceProvider;
         }
+        private void Dispose()
+        {
+            if (_connector != null)
+            {
+                Marshal.FinalReleaseComObject(_connector);
+                _connector = null;
+            }
+            if (_serverAgent != null)
+            {
+                Marshal.FinalReleaseComObject(_serverAgent);
+                _serverAgent = null;
+            }
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        private void DisposeComObjects(object[] comObjects)
+        {
+            for (int i = 0; i < comObjects.Length; i++)
+            {
+                if (comObjects[i] != null)
+                {
+                    Marshal.FinalReleaseComObject(comObjects[i]);
+                    comObjects[i] = null;
+                }
+            }
+        }
+        
         public void InspectWorkingProcesses()
         {
-            string progID = "V83.COMConnector";
-            Type t = Type.GetTypeFromProgID(progID);
-            //Type t = Type.GetTypeFromCLSID(new Guid("181E893D-73A4-4722-B61D-D604B3D67D47"));
-            if (t == null)
-            {
-                FileLogger.Log(progID + " is not found.");
-                return;
-            }
+            if (!InitializeConnector()) return;
+            if (!InitializeServerAgent()) return;
 
-            object connector = null;
-            try
-            {
-                connector = Activator.CreateInstance(t);
-            }
-            catch (Exception error)
-            {
-                FileLogger.Log(ExceptionHelper.GetErrorText(error));
-            }
-            if (connector == null) return;
-
-            FileLogger.Log("Connecting " + Settings.ServerAddress + " ...");
-
-            object agent = connector.GetType().InvokeMember("ConnectAgent",
-                BindingFlags.Public | BindingFlags.InvokeMethod, null, connector,
-                new object[] { Settings.ServerAddress }); // IServerAgentConnection
-
-            if (agent == null)
-            {
-                FileLogger.Log("Failed to connect " + Settings.ServerAddress + ".");
-                return;
-            }
-
-            FileLogger.Log("Connected " + Settings.ServerAddress + " successfully.");
-
-            object[] clusters = (object[])agent.GetType().InvokeMember("GetClusters",
-                BindingFlags.Public | BindingFlags.InvokeMethod, null, agent,
-                null); // COMSafeArray of IClusterInfo
-
-            int count = clusters.Length;
-
-            if (count == 0)
+            object[] clusters = GetClusters();
+            if (clusters == null || clusters.Length == 0)
             {
                 FileLogger.Log("List of clusters is empty.");
                 return;
             }
 
-            for (int i = 0; i < count; i++)
+            foreach (object cluster in clusters)
             {
-                object cluster = clusters[i]; // IClusterInfo
+                InspectCluster(cluster); // IClusterInfo
+            }
+            DisposeComObjects(clusters);
 
-                string clusterName = (string)cluster.GetType().InvokeMember("ClusterName",
-                    BindingFlags.Public | BindingFlags.GetProperty, null, cluster,
-                    null);
+            Dispose();
+        }
+        
+        private bool InitializeConnector()
+        {
+            if (_connector != null) return true;
 
-                FileLogger.Log("Inspecting " + Settings.ServerAddress + " [" + clusterName + "] ...");
+            Type connectorType;
+            if (string.IsNullOrWhiteSpace(Settings.CLSID))
+            {
+                connectorType = Type.GetTypeFromProgID(CONST_PROGID);
+            }
+            else
+            {
+                connectorType = Type.GetTypeFromCLSID(new Guid(Settings.CLSID));
+            }
 
-                FileLogger.Log("Authenticating with " + clusterName + " ...");
+            if (connectorType == null)
+            {
+                if (string.IsNullOrWhiteSpace(Settings.CLSID))
+                {
+                    FileLogger.Log("ProgID \"" + CONST_PROGID + "\" is not found.");
+                }
+                else
+                {
+                    FileLogger.Log("CLSID {" + Settings.CLSID + "} is not found.");
+                }
+                return false;
+            }
 
-                _ = agent.GetType().InvokeMember("Authenticate",
-                    BindingFlags.Public | BindingFlags.InvokeMethod, null, agent,
+            try
+            {
+                _connector = Activator.CreateInstance(connectorType);
+                FileLogger.Log(CONST_PROGID + " initialized successfully.");
+            }
+            catch (Exception error)
+            {
+                FileLogger.Log(ExceptionHelper.GetErrorText(error));
+            }
+
+            return (_connector != null);
+        }
+        private bool InitializeServerAgent()
+        {
+            if (_connector == null) throw new InvalidOperationException(CONST_PROGID + " is not initialized.");
+
+            if (_serverAgent != null) return true;
+
+            FileLogger.Log("Connecting " + Settings.ServerAddress + " ...");
+
+            Type proxy = _connector.GetType();
+
+            try
+            {
+                _serverAgent = proxy.InvokeMember("ConnectAgent",
+                    BindingFlags.Public | BindingFlags.InvokeMethod, null, _connector,
+                    new object[] { Settings.ServerAddress }); // IServerAgentConnection
+
+                FileLogger.Log("Connected " + Settings.ServerAddress + " successfully.");
+            }
+            catch (Exception error)
+            {
+                FileLogger.Log("Failed to connect " + Settings.ServerAddress + "."
+                    + Environment.NewLine + ExceptionHelper.GetErrorText(error));
+            }
+
+            return (_serverAgent != null);
+        }
+
+        private object[] GetClusters()
+        {
+            if (_connector == null) throw new InvalidOperationException(CONST_PROGID + " is not initialized.");
+            if (_serverAgent == null) throw new InvalidOperationException("Server agent " + Settings.ServerAddress + " is not initialized.");
+
+            Type proxy = _serverAgent.GetType();
+
+            object[] clusters = null;
+            try
+            {
+                clusters = (object[])proxy.InvokeMember("GetClusters",
+                    BindingFlags.Public | BindingFlags.InvokeMethod, null, _serverAgent,
+                    null); // COMSafeArray of IClusterInfo
+            }
+            catch (Exception error)
+            {
+                FileLogger.Log(ExceptionHelper.GetErrorText(error));
+            }
+            return clusters;
+        }
+        private void InspectCluster(object cluster)
+        {
+            Type clusterProxy = cluster.GetType();
+
+            string clusterName = (string)clusterProxy.InvokeMember("ClusterName",
+                BindingFlags.Public | BindingFlags.GetProperty, null, cluster,
+                null);
+
+            FileLogger.Log("Inspecting cluster [" + clusterName + "] on " + Settings.ServerAddress + " ...");
+
+            if (!AuthenticateWithCluster(cluster))
+            {
+                FileLogger.Log("Inspection of cluster [" + clusterName + "] on " + Settings.ServerAddress + " is finished.");
+                return;
+            }
+
+            Dictionary<string, ResetInfo> serversToReset = GetWorkingServersToReset(cluster);
+            if (serversToReset.Count == 0)
+            {
+                FileLogger.Log("Working process memory limit is not exceeded.");
+                return;
+            }
+
+            string text = "List of working servers to be reset:";
+            foreach (ResetInfo info in serversToReset.Values)
+            {
+                text += Environment.NewLine + info.HostName;
+            }
+            FileLogger.Log(text);
+
+            object[] workingServers = GetWorkingServers(cluster);
+            if (workingServers == null || workingServers.Length == 0)
+            {
+                FileLogger.Log("List of working servers for cluster [" + clusterName + "] on " + Settings.ServerAddress + " is empty.");
+                return;
+            }
+            foreach (object workingServer in workingServers)
+            {
+                ResetWorkingServer(cluster, workingServer, serversToReset);
+            }
+            DisposeComObjects(workingServers);
+
+            FileLogger.Log("Inspection of cluster [" + clusterName + "] on " + Settings.ServerAddress + " is finished.");
+        }
+        private bool AuthenticateWithCluster(object cluster)
+        {
+            Type clusterProxy = cluster.GetType();
+
+            string clusterName = (string)clusterProxy.InvokeMember("ClusterName",
+                BindingFlags.Public | BindingFlags.GetProperty, null, cluster,
+                null);
+
+            FileLogger.Log("Authenticating with [" + clusterName + "] ...");
+
+            Type agentProxy = _serverAgent.GetType();
+
+            try
+            {
+                _ = agentProxy.InvokeMember("Authenticate",
+                    BindingFlags.Public | BindingFlags.InvokeMethod, null, _serverAgent,
                     new object[] { cluster, Settings.UserName, Settings.Password });
 
-                FileLogger.Log("Authenticated with " + clusterName + " successfully.");
-
-                object[] workingProcesses = (object[])agent.GetType().InvokeMember("GetWorkingProcesses",
-                    BindingFlags.Public | BindingFlags.InvokeMethod, null, agent,
-                    new object[] { cluster });
-
-                List<string> serversToReset = GetWorkingServersToResetWorkingProcesses(Settings.WorkingServers, workingProcesses);
-
-                if (serversToReset.Count == 0)
-                {
-                    FileLogger.Log("Working process memory limit is not exceeded.");
-                    return;
-                }
-
-                foreach (string serverName in serversToReset)
-                {
-                    long memoryInUse = GetWorkingServerMemoryInUse(serverName, workingProcesses);
-                    
-                    object workingServer = GetWorkingServerByName(agent, cluster, serverName);
-                    if (workingServer == null)
-                    {
-                        FileLogger.Log("Working server " + serverName + " is not found.");
-                        continue;
-                    }
-
-                    FileLogger.Log("Start reset of working processes on working server " + serverName + " ..."
-                        + " Total memory in use is " + memoryInUse.ToString() + " Kb.");
-                    
-                    ResetWorkingServer(agent, cluster, workingServer, memoryInUse);
-
-                    FileLogger.Log("Reset of working processes on working server " + serverName + " is finished.");
-
-                    Marshal.FinalReleaseComObject(workingServer);
-                }
-
-                foreach (object workingProcess in workingProcesses)
-                {
-                    Marshal.FinalReleaseComObject(workingProcess);
-                }
-                Marshal.FinalReleaseComObject(cluster);
-
-                FileLogger.Log("Inspecting " + Settings.ServerAddress + " [" + clusterName + "] is finished.");
+                FileLogger.Log("Authenticated with [" + clusterName + "] successfully.");
             }
-
-            Marshal.FinalReleaseComObject(agent);
-            Marshal.FinalReleaseComObject(connector);
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-        }
-        private List<string> GetWorkingServersToResetWorkingProcesses(List<string> workingServers, object[] workingProcesses)
-        {
-            List<string> servers = new List<string>();
-
-            for (int i = 0; i < workingProcesses.Length; i++)
+            catch (Exception error)
             {
-                object wp = workingProcesses[i];
-
-                Type proxy = wp.GetType();
-
-                string pid = (string)proxy.InvokeMember("PID", BindingFlags.Public | BindingFlags.GetProperty, null, wp, null);
-                int memorySize = (int)proxy.InvokeMember("MemorySize", BindingFlags.Public | BindingFlags.GetProperty, null, wp, null);
-
-                if (memorySize > Settings.WorkingProcessMemoryLimit)
-                {
-                    string hostName = (string)proxy.InvokeMember("HostName", BindingFlags.Public | BindingFlags.GetProperty, null, wp, null);
-
-                    if (string.IsNullOrEmpty(servers.Where(s => s == hostName).FirstOrDefault()))
-                    {
-                        if (workingServers.Count == 0 || !string.IsNullOrEmpty(workingServers.Where(ws => ws == hostName).FirstOrDefault()))
-                        {
-                            servers.Add(hostName);
-
-                            FileLogger.Log("Host name '" + hostName + "'"
-                                + ", working process pid '" + pid + "'"
-                                + ", memory usage is " + memorySize.ToString() + " Kb."
-                                + " Memory limit of " + Settings.WorkingProcessMemoryLimit.ToString() + " Kb is exceeded.");
-                        }
-                    }
-                }
+                FileLogger.Log("Failed to authenticate with cluster [" + clusterName + "]"
+                    + Environment.NewLine + ExceptionHelper.GetErrorText(error));
+                return false;
             }
 
-            return servers;
+            return true;
         }
-        private long GetWorkingServerMemoryInUse(string workingServer, object[] workingProcesses)
+        
+        private Dictionary<string, ResetInfo> GetWorkingServersToReset(object cluster)
         {
-            long memorySize = 0; // Kb
+            Dictionary<string, ResetInfo> serversToReset = new Dictionary<string, ResetInfo>();
 
-            for (int i = 0; i < workingProcesses.Length; i++)
-            {
-                object wp = workingProcesses[i];
+            Type agentProxy = _serverAgent.GetType();
 
-                Type proxy = wp.GetType();
-
-                bool enabled = (bool)proxy.InvokeMember("IsEnable", BindingFlags.Public | BindingFlags.GetProperty, null, wp, null);
-                string hostName = (string)proxy.InvokeMember("HostName", BindingFlags.Public | BindingFlags.GetProperty, null, wp, null);
-
-                if (hostName != workingServer) continue;
-
-                if (enabled)
-                {
-                    memorySize += (int)proxy.InvokeMember("MemorySize", BindingFlags.Public | BindingFlags.GetProperty, null, wp, null);
-                }
-            }
-
-            return memorySize;
-        }
-
-        private object GetWorkingServerByName(object agent, object cluster, string serverName)
-        {
-            object[] workingServers = (object[])agent.GetType().InvokeMember("GetWorkingServers",
-                BindingFlags.Public | BindingFlags.InvokeMethod, null, agent,
+            object[] workingProcesses = (object[])agentProxy.InvokeMember("GetWorkingProcesses",
+                BindingFlags.Public | BindingFlags.InvokeMethod, null, _serverAgent,
                 new object[] { cluster });
 
-            if (workingServers == null || workingServers.Length == 0) return null;
-
-            for (int i = 0; i < workingServers.Length; i++)
+            if (workingProcesses == null || workingProcesses.Length == 0)
             {
-                object workingServer = workingServers[i];
-
-                string hostName = (string)workingServer.GetType().InvokeMember("HostName",
-                    BindingFlags.Public | BindingFlags.GetProperty, null, workingServer, null);
-
-                if (hostName == serverName)
-                {
-                    return workingServer;
-                }
+                return serversToReset;
             }
 
-            return null;
+            foreach (object workingProcess in workingProcesses)
+            {
+                Type proxy = workingProcess.GetType();
+
+                string pid = (string)proxy.InvokeMember("PID", BindingFlags.Public | BindingFlags.GetProperty, null, workingProcess, null);
+                bool enabled = (bool)proxy.InvokeMember("IsEnable", BindingFlags.Public | BindingFlags.GetProperty, null, workingProcess, null);
+                int memorySize = (int)proxy.InvokeMember("MemorySize", BindingFlags.Public | BindingFlags.GetProperty, null, workingProcess, null);
+                string hostName = (string)proxy.InvokeMember("HostName", BindingFlags.Public | BindingFlags.GetProperty, null, workingProcess, null);
+
+                if (!enabled) continue; // Неактивные рабочие процессы не учитываем
+
+                if (Settings.WorkingServerMemoryLimits.Count > 0
+                    && !Settings.WorkingServerMemoryLimits.ContainsKey(hostName))
+                {
+                    continue; // Рабочий процесс не принадлежит инспектируемым рабочим серверам - не учитываем
+                }
+
+                ResetInfo info;
+                if (serversToReset.TryGetValue(hostName, out info))
+                {
+                    info.TotalMemory += memorySize * 1024; // bytes
+                }
+                else
+                {
+                    info = new ResetInfo()
+                    {
+                        Reset = false,
+                        HostName = hostName,
+                        TotalMemory = memorySize * 1024 // bytes
+                    };
+                    serversToReset.Add(hostName, info);
+                }
+
+                bool exceeded = IsWorkingProcessExceedsMemoryLimit(hostName, memorySize, out int memoryLimit);
+
+                if (exceeded)
+                {
+                    info.Reset = exceeded;
+                    FileLogger.Log(hostName + ", PID " + pid
+                        + " (" + memorySize.ToString() + " Kb)"
+                        + " exceeds memory limit of " + memoryLimit.ToString() + " Kb.");
+                }
+            }
+            DisposeComObjects(workingProcesses);
+
+            Dictionary<string, ResetInfo> result = new Dictionary<string, ResetInfo>();
+            foreach (var item in serversToReset)
+            {
+                if (item.Value.Reset)
+                {
+                    result.Add(item.Key, item.Value);
+                }
+            }
+            serversToReset.Clear();
+
+            return result;
         }
-        private void ResetWorkingServer(object agent, object cluster, object workingServer, long memoryInUse)
+        private bool IsWorkingProcessExceedsMemoryLimit(string hostName, int memorySize, out int memoryLimit)
         {
-            long memoryLimit = (memoryInUse * 1024) - (memoryInUse * 1024) / 100 * 15; // 15% less than in use
+            if (Settings.WorkingServerMemoryLimits.TryGetValue(hostName, out memoryLimit))
+            {
+                if (memorySize > memoryLimit)
+                {
+                    return true; // Используем индивидуальную настройку для рабочего сервера
+                }
+            }
+            else if (memorySize > Settings.WorkingProcessMemoryLimit)
+            {
+                memoryLimit = Settings.WorkingProcessMemoryLimit;
+                return true; // Используем общую настройку для всех рабочих серверов
+            }
+            return false;
+        }
+
+        private object[] GetWorkingServers(object cluster)
+        {
+            if (cluster == null) throw new ArgumentNullException(nameof(cluster));
+            if (_connector == null) throw new InvalidOperationException(CONST_PROGID + " is not initialized.");
+            if (_serverAgent == null) throw new InvalidOperationException("Server agent " + Settings.ServerAddress + " is not initialized.");
+
+            Type proxy = _serverAgent.GetType();
+
+            object[] workingServers = null;
+            try
+            {
+                workingServers = (object[])proxy.InvokeMember("GetWorkingServers",
+                    BindingFlags.Public | BindingFlags.InvokeMethod, null, _serverAgent,
+                    new object[] { cluster });
+            }
+            catch (Exception error)
+            {
+                FileLogger.Log(ExceptionHelper.GetErrorText(error));
+            }
+            return workingServers;
+        }
+        private void ResetWorkingServer(object cluster, object workingServer, Dictionary<string, ResetInfo> serversToReset)
+        {
+            Type agentProxy = _serverAgent.GetType();
+            Type serverProxy = workingServer.GetType();
+
+            string hostName = (string)serverProxy.InvokeMember("HostName",
+                BindingFlags.Public | BindingFlags.GetProperty, null, workingServer,
+                null);
+
+            if (!serversToReset.TryGetValue(hostName, out ResetInfo info))
+            {
+                return;
+            }
+
+            FileLogger.Log("Start to reset working processes on working server " + info.HostName + " ...");
 
             // get current values
 
-            long currentMemoryLimit = (long)workingServer.GetType().InvokeMember("TemporaryAllowedProcessesTotalMemory",
-                        BindingFlags.Public | BindingFlags.GetProperty, null, workingServer, null); // bytes
+            long currentMemoryLimit = (long)serverProxy.InvokeMember("TemporaryAllowedProcessesTotalMemory",
+                BindingFlags.Public | BindingFlags.GetProperty, null, workingServer, null); // bytes
 
-            long currentTimeWait = (long)workingServer.GetType().InvokeMember("TemporaryAllowedProcessesTotalMemoryTimeLimit",
-                    BindingFlags.Public | BindingFlags.GetProperty, null, workingServer, null); // seconds
+            long currentTimeLimit = (long)serverProxy.InvokeMember("TemporaryAllowedProcessesTotalMemoryTimeLimit",
+                BindingFlags.Public | BindingFlags.GetProperty, null, workingServer, null); // seconds
 
-            FileLogger.Log("Current memory limit = " + currentMemoryLimit.ToString() + " Kb,"
-                + " current time limit = " + currentTimeWait.ToString() + " seconds.");
+            FileLogger.Log("Current memory limit = " + (currentMemoryLimit / 1024).ToString() + " Kb,"
+                + " current time limit = " + currentTimeLimit.ToString() + " seconds.");
 
             // set limit values
 
-            workingServer.GetType().InvokeMember("TemporaryAllowedProcessesTotalMemory",
-                        BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
-                        new object[] { memoryLimit }); // bytes
+            long memoryLimit = info.TotalMemory - info.TotalMemory / 100 * 20; // 20% less than in use
 
-            workingServer.GetType().InvokeMember("TemporaryAllowedProcessesTotalMemoryTimeLimit",
-                    BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
-                    new object[] { 1 }); // seconds
+            serverProxy.InvokeMember("TemporaryAllowedProcessesTotalMemory",
+                BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
+                new object[] { memoryLimit }); // bytes
 
-            agent.GetType().InvokeMember("UpdateWorkingServer",
-                BindingFlags.Public | BindingFlags.InvokeMethod, null, agent,
+            serverProxy.InvokeMember("TemporaryAllowedProcessesTotalMemoryTimeLimit",
+                BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
+                new object[] { 1 }); // seconds
+
+            agentProxy.InvokeMember("UpdateWorkingServer",
+                BindingFlags.Public | BindingFlags.InvokeMethod, null, _serverAgent,
                 new object[] { cluster, workingServer });
 
-            FileLogger.Log("New memory limit = " + memoryLimit.ToString() + " Kb, new time limit = 1 second.");
+            FileLogger.Log("New memory limit = " + (memoryLimit / 1024).ToString() + " Kb, new time limit = 1 second.");
 
             // wait for limits to take effect
 
@@ -255,20 +397,22 @@ namespace rphost_manager
 
             // restore default values
 
-            workingServer.GetType().InvokeMember("TemporaryAllowedProcessesTotalMemory",
-                    BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
-                    new object[] { currentMemoryLimit }); // bytes
+            serverProxy.InvokeMember("TemporaryAllowedProcessesTotalMemory",
+                BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
+                new object[] { currentMemoryLimit }); // bytes
 
-            workingServer.GetType().InvokeMember("TemporaryAllowedProcessesTotalMemoryTimeLimit",
-                    BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
-                    new object[] { currentTimeWait }); // seconds
+            serverProxy.InvokeMember("TemporaryAllowedProcessesTotalMemoryTimeLimit",
+                BindingFlags.Public | BindingFlags.SetProperty, null, workingServer,
+                new object[] { currentTimeLimit }); // seconds
 
-            agent.GetType().InvokeMember("UpdateWorkingServer",
-                BindingFlags.Public | BindingFlags.InvokeMethod, null, agent,
+            agentProxy.InvokeMember("UpdateWorkingServer",
+                BindingFlags.Public | BindingFlags.InvokeMethod, null, _serverAgent,
                 new object[] { cluster, workingServer });
 
-            FileLogger.Log("Restored memory limit = " + currentMemoryLimit.ToString() + " Kb,"
-                + " restored time limit = " + currentTimeWait.ToString() + " seconds.");
+            FileLogger.Log("Restored memory limit = " + (currentMemoryLimit / 1024).ToString() + " Kb,"
+                + " restored time limit = " + currentTimeLimit.ToString() + " seconds.");
+
+            FileLogger.Log("Reset of working processes on working server " + info.HostName + " is finished.");
         }
     }
 }
