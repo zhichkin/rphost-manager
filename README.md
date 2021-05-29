@@ -1,10 +1,14 @@
 # 1C rphost manager
 
-[Подробности идеи в статье от экспертов 1С:Рарус.](https://rarus.ru/publications/20200518-ot-ekspertov-1c-rarus-optimizatsiya-perezapuska-rabochikh-protsessov-na-platforme-1c-8-3-15-i-vyshe-424479/#povyshennyi-raskhod-pamyati-i-vozmozhnye-prichiny)
+[Подробное описание идеи и решаемой задачи](https://rarus.ru/publications/20200518-ot-ekspertov-1c-rarus-optimizatsiya-perezapuska-rabochikh-protsessov-na-platforme-1c-8-3-15-i-vyshe-424479/#povyshennyi-raskhod-pamyati-i-vozmozhnye-prichiny)
 
-Служба Windows, которая следит за объёмом памяти, потребляемой rphost'ами 1C. В случае если один или более rphost'ов начинают потреблять больше установленного в настройках лимита памяти для одного rphost'а, служба rphost-manager перенастривает свойства соответствующего рабочего сервера 1С, а именно "TemporaryAllowedProcessesTotalMemory" и "TemporaryAllowedProcessesTotalMemoryTimeLimit" таким образом, чтобы соответствующие rphost'ы были перезапущены менеджером кластера 1С. Затем rphost-manager ждёт установленное в настройках время и возвращает настройки сервера 1С к первоначальным значениям. Запуск проверки расхода памяти rphost'ами запускается с интервалом, определяемым в настройках.
+[Скачать актуальную версию rphost-manager](https://github.com/zhichkin/rphost-manager/releases)
 
-Кроме этого в настройках можно указать какие рабочие сервера кластера 1С проверять. Если в настройке **WorkingServers** файла **appsettings.json** не указано ни одного сервера, то будут проверяться rphost'ы для всех рабочих серверов кластера 1С.
+Служба Windows, которая следит за объёмом памяти, потребляемой каждым rphost'ом 1C по отдельности.
+
+**Цель мониторинга:** автоматический перезапуск rphost'ов для предотвращения деградации их производительности.
+
+В случае обнаружения превышения любым rphost'ом установленного для него лимита памяти, служба rphost-manager перенастривает свойства соответствующего рабочего сервера 1С, а именно **TemporaryAllowedProcessesTotalMemory** (временно допустимый объём памяти процессов) и **TemporaryAllowedProcessesTotalMemoryTimeLimit** (интервал превышения допустимого объёма памяти процессов), таким образом, чтобы менеджер кластера 1С начал перезапуск rphost'ов. После перезапуска служба rphost-manager возвращает эти настройки к исходным значениям.
 
 Совместимо с версиями платформы 1С:Предприятие 8.3.15 и выше.
 
@@ -14,8 +18,8 @@
 ```SQL
 regsvr32 "C:\Program Files\1cv8\8.3.15.1778\bin\comcntr.dll"
 ```
-4. Распаковать содержимое установочного архива в любой каталог.
-5. Установить сервис WIndows, выполнив команду от имени администратора:
+4. Распаковать содержимое [установочного архива](https://github.com/zhichkin/rphost-manager/releases) в любой каталог.
+5. Установить сервис Windows, выполнив команду от имени администратора:
 ```SQL
 sc create "1C RpHost Manager" binPath="D:\RphostManager\rphost-manager.exe"
 ```
@@ -23,25 +27,48 @@ sc create "1C RpHost Manager" binPath="D:\RphostManager\rphost-manager.exe"
 **Настройка**
 
 - **LogSize** - размер лога программы в байтах. По достижению этого лимита файл лога перезаписывается.
+- **CLSID** - идентификатор COM объекта "V83.COMConnector". Данная настройка используется только в том случае, если она заполнена. В противном случае используется ProgID "V83.COMConnector".
 - **InspectionPeriodicity** - периодичность инспекции объёма памяти, используемого rphost'ами, в секундах.
 - **ServerAddress** - адрес центрального сервера 1С.
 - **UserName** - имя пользователя для подключения к кластеру 1С.
 - **Password** - пароль пользователя для подключения к кластеру 1С.
-- **WorkingServers** - список рабочих серверов 1С, которые нужно инспектировать. Если не указано, то все. Строковые значения, перечисленные через запятую.
 - **WorkingServerResetWaitTime** - период ожидания переключения rphost'ов менеджером кластера 1С в нерабочее состояние в секундах.
-- **WorkingProcessMemoryLimit** - лимит памяти для одного rphost'а в килобайтах.
+- **WorkingProcessMemoryLimit** - лимит памяти для одного rphost'а в килобайтах. Используется только в том случае, если не определён список индивидуальных настроек для рабочих серверов **WorkingServerMemoryLimits**.
+- **WorkingServerMemoryLimits** - список рабочих серверов 1С, которые нужно инспектировать, и лимит памяти rphost'а для каждого сервера в отдельности. Если список пустой, то инспектируются все сервера кластера, а в качестве лимита памяти rphost'а используется настройка **WorkingProcessMemoryLimit**.
 
-**Пример файла настроек appsettings.json**
+**Пример 1. Файл appsettings.json (общая для всех рабочих серверов настройка)**
 ```JSON
 {
-  "LogSize": 262144,
+  "LogSize": 131072,
+  "CLSID": "",
   "InspectionPeriodicity": 180,
   "ServerAddress": "tcp://MSK01:1540",
   "UserName": "",
   "Password": "",
-  "WorkingServers": [ "MSK01-SRV01.LOCAL" ],
   "WorkingServerResetWaitTime": 10,
   "WorkingProcessMemoryLimit": 4194304,
+  "WorkingServerMemoryLimits": {},
+  "HostOptions": {
+    "ShutdownTimeout": "00:00:30"
+  }
+}
+```
+
+**Пример 2. Файл appsettings.json (индивидуальная настройка рабочих серверов)**
+```JSON
+{
+  "LogSize": 262144,
+  "CLSID": "181E893D-73A4-4722-B61D-D604B3D67D47",
+  "InspectionPeriodicity": 300,
+  "ServerAddress": "tcp://MSK01:1540",
+  "UserName": "",
+  "Password": "",
+  "WorkingServerResetWaitTime": 10,
+  "WorkingProcessMemoryLimit": 2097152,
+  "WorkingServerMemoryLimits": {
+    "MSK01-SRV01": 1048576,
+    "MSK01-SRV02": 2097152
+  },
   "HostOptions": {
     "ShutdownTimeout": "00:00:30"
   }
